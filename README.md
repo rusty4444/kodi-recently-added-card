@@ -4,6 +4,11 @@ A custom Home Assistant Lovelace card that shows your recently added movies and 
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-blue)](https://github.com/hacs/integration)
 ![Platform](https://img.shields.io/badge/Platform-Home_Assistant-blue)
+
+<p align="center">
+  <img src="screenshots/recently-added.jpg" alt="Kodi Recently Added Card" width="600">
+</p>
+
 ## Features
 
 - Displays the 5 most recently added movies and 5 most recently added TV shows from Kodi
