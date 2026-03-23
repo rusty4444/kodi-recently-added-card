@@ -1,0 +1,672 @@
+/**
+ * Kodi Recently Added Card
+ * Custom Lovelace card that displays the latest movies and TV shows
+ * from Kodi's JSON-RPC API, with interleaved movie/show cycling and
+ * cinematic transitions. Adapted from Plex Recently Added Card.
+ */
+
+class KodiRecentlyAddedCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._items = [];
+    this._currentIndex = 0;
+    this._cycleTimer = null;
+    this._config = {};
+  }
+
+  setConfig(config) {
+    if (!config.kodi_url) throw new Error('Please define kodi_url');
+
+    this._config = {
+      kodi_url: config.kodi_url.replace(/\/$/, ''),
+      kodi_username: config.kodi_username || null,
+      kodi_password: config.kodi_password || null,
+      movies_count: config.movies_count || 5,
+      shows_count: config.shows_count || 5,
+      cycle_interval: config.cycle_interval || 8,
+      title: config.title !== undefined ? config.title : 'Recently Added',
+      ...config,
+    };
+
+    this._render();
+    this._fetchData();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+  }
+
+  /**
+   * Build headers for Kodi JSON-RPC requests.
+   * Includes basic auth if username/password are configured.
+   */
+  _getHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (this._config.kodi_username && this._config.kodi_password) {
+      const credentials = btoa(
+        `${this._config.kodi_username}:${this._config.kodi_password}`
+      );
+      headers['Authorization'] = `Basic ${credentials}`;
+    }
+    return headers;
+  }
+
+  /**
+   * Send a JSON-RPC request to Kodi.
+   */
+  async _kodiRPC(method, params = {}) {
+    const url = `${this._config.kodi_url}/jsonrpc`;
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params,
+      id: 1,
+    });
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: this._getHeaders(),
+      body,
+    });
+    if (!resp.ok) throw new Error(`Kodi HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.error) throw new Error(`Kodi RPC error: ${data.error.message}`);
+    return data.result;
+  }
+
+  /**
+   * Convert a Kodi art value to a usable image URL via Kodi's image proxy.
+   * Art values look like: image://http%3a%2f%2f... or image:///local/path
+   * Served at: {kodi_url}/image/{encodeURIComponent(artValue)}
+   */
+  _getImageUrl(artValue) {
+    if (!artValue) return '';
+    const base = this._config.kodi_url;
+    return `${base}/image/${encodeURIComponent(artValue)}`;
+  }
+
+  async _fetchData() {
+    try {
+      const moviesCount = this._config.movies_count;
+      const showsCount = this._config.shows_count;
+
+      // Fetch recently added movies
+      const moviesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedMovies', {
+        properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa'],
+        limits: { start: 0, end: moviesCount },
+      });
+
+      // Fetch recently added episodes (fetch more for deduplication)
+      const episodesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedEpisodes', {
+        properties: ['title', 'showtitle', 'season', 'episode', 'rating', 'runtime', 'plot', 'art', 'dateadded'],
+        limits: { start: 0, end: showsCount * 4 },
+      });
+
+      const rawMovies = moviesResult.movies || [];
+      const rawEpisodes = episodesResult.episodes || [];
+
+      // Parse Kodi dateadded string "YYYY-MM-DD HH:MM:SS" to Unix timestamp
+      const parseDate = (str) => {
+        if (!str) return 0;
+        // Replace space with T for ISO 8601 compatibility
+        return Math.floor(new Date(str.replace(' ', 'T')).getTime() / 1000);
+      };
+
+      // Map movies to display items
+      const movieItems = rawMovies.map((movie) => {
+        const genres = (movie.genre || []).join(', ');
+        const subtitleParts = [
+          movie.year ? String(movie.year) : null,
+          movie.mpaa || null,
+          genres || null,
+        ].filter(Boolean);
+
+        return {
+          title: movie.title || '',
+          subtitle: subtitleParts.join(' · '),
+          type: 'movie',
+          typeLabel: 'Movie',
+          rating: movie.rating ? parseFloat(movie.rating.toFixed(1)) : null,
+          duration: movie.runtime ? Math.round(movie.runtime / 60) : null,
+          summary: movie.plot || '',
+          thumb: movie.art && movie.art.poster ? movie.art.poster : '',
+          art: movie.art && movie.art.fanart ? movie.art.fanart : '',
+          addedAt: parseDate(movie.dateadded),
+        };
+      });
+
+      // Sort movies by addedAt descending (Kodi already returns most recent
+      // first, but sort anyway for safety) then trim
+      movieItems.sort((a, b) => b.addedAt - a.addedAt);
+      const finalMovies = movieItems.slice(0, moviesCount);
+
+      // Sort episodes by addedAt descending
+      const sortedEpisodes = rawEpisodes
+        .slice()
+        .sort((a, b) => parseDate(b.dateadded) - parseDate(a.dateadded));
+
+      // Deduplicate TV episodes — only keep the most recent per show
+      const seenShows = new Set();
+      const uniqueEpisodes = [];
+      for (const ep of sortedEpisodes) {
+        const showName = ep.showtitle || ep.title || '';
+        if (!seenShows.has(showName)) {
+          seenShows.add(showName);
+          uniqueEpisodes.push(ep);
+        }
+        if (uniqueEpisodes.length >= showsCount) break;
+      }
+
+      // Map episodes to display items
+      const tvItems = uniqueEpisodes.map((ep) => {
+        const season = String(ep.season || 0).padStart(2, '0');
+        const epNum = String(ep.episode || 0).padStart(2, '0');
+        return {
+          title: ep.showtitle || ep.title || '',
+          subtitle: `S${season}E${epNum} · ${ep.title || ''}`,
+          type: 'tv',
+          typeLabel: 'TV Show',
+          rating: ep.rating ? parseFloat(ep.rating.toFixed(1)) : null,
+          duration: ep.runtime ? Math.round(ep.runtime / 60) : null,
+          summary: ep.plot || '',
+          thumb: (ep.art && (ep.art['tvshow.poster'] || ep.art.thumb)) || '',
+          art: (ep.art && (ep.art['tvshow.fanart'] || ep.art.fanart)) || '',
+          addedAt: parseDate(ep.dateadded),
+        };
+      });
+
+      // Interleave: movie, show, movie, show, …
+      const interleaved = [];
+      const maxLen = Math.max(finalMovies.length, tvItems.length);
+      for (let i = 0; i < maxLen; i++) {
+        if (i < finalMovies.length) interleaved.push(finalMovies[i]);
+        if (i < tvItems.length) interleaved.push(tvItems[i]);
+      }
+
+      this._items = interleaved;
+      this._currentIndex = 0;
+      this._updateDisplay();
+      this._startCycle();
+    } catch (err) {
+      console.warn('Kodi Recently Added Card: Fetch error', err);
+      const errEl = this.shadowRoot.querySelector('.error-msg');
+      if (errEl) {
+        errEl.textContent = `Could not connect to Kodi: ${err.message}`;
+        errEl.style.display = 'block';
+      }
+    }
+  }
+
+  _startCycle() {
+    if (this._cycleTimer) clearInterval(this._cycleTimer);
+    if (this._items.length <= 1) return;
+
+    this._cycleTimer = setInterval(() => {
+      this._currentIndex = (this._currentIndex + 1) % this._items.length;
+      this._updateDisplay();
+    }, this._config.cycle_interval * 1000);
+  }
+
+  _updateDisplay() {
+    if (!this._items.length) return;
+    const item = this._items[this._currentIndex];
+    const root = this.shadowRoot;
+
+    // Background art — crossfade transition
+    const bgEl = root.querySelector('.bg-art');
+    const bgNew = root.querySelector('.bg-art-next');
+    if (bgNew && item.art) {
+      const artUrl = this._getImageUrl(item.art);
+      bgNew.style.backgroundImage = `url(${artUrl})`;
+      bgNew.classList.add('active');
+      setTimeout(() => {
+        if (bgEl) bgEl.style.backgroundImage = bgNew.style.backgroundImage;
+        bgNew.classList.remove('active');
+      }, 800);
+    }
+
+    // Poster — fade in on load
+    const posterEl = root.querySelector('.poster');
+    if (posterEl && item.thumb) {
+      posterEl.style.opacity = '0';
+      const img = new Image();
+      img.onload = () => {
+        posterEl.src = img.src;
+        posterEl.style.opacity = '1';
+      };
+      img.src = this._getImageUrl(item.thumb);
+    }
+
+    // Text elements
+    const titleEl = root.querySelector('.item-title');
+    const subtitleEl = root.querySelector('.item-subtitle');
+    const typeEl = root.querySelector('.item-type');
+    const ratingEl = root.querySelector('.item-rating');
+    const summaryEl = root.querySelector('.item-summary');
+    const dotsEl = root.querySelector('.dots');
+    const counterEl = root.querySelector('.counter');
+
+    if (titleEl) titleEl.textContent = item.title;
+    if (subtitleEl) subtitleEl.textContent = item.subtitle;
+    if (typeEl) {
+      typeEl.textContent = item.typeLabel;
+      typeEl.className = `item-type ${item.type}`;
+    }
+    if (ratingEl) {
+      if (item.rating) {
+        // Kodi uses 0–10 scale; display with one decimal
+        ratingEl.textContent = `★ ${item.rating.toFixed(1)}`;
+        ratingEl.style.display = 'inline-block';
+      } else {
+        ratingEl.style.display = 'none';
+      }
+    }
+    if (summaryEl) summaryEl.textContent = item.summary;
+
+    // Dots — color-coded: gold for movies, blue for TV
+    if (dotsEl) {
+      dotsEl.innerHTML = this._items
+        .map((it, i) => {
+          const colorClass = it.type === 'movie' ? 'movie' : 'tv';
+          const activeClass = i === this._currentIndex ? 'active' : '';
+          return `<span class="dot ${colorClass} ${activeClass}"></span>`;
+        })
+        .join('');
+    }
+
+    // Counter
+    if (counterEl) {
+      counterEl.textContent = `${this._currentIndex + 1} / ${this._items.length}`;
+    }
+
+    // Time ago
+    const timeEl = root.querySelector('.time-ago');
+    if (timeEl && item.addedAt) {
+      const now = Date.now() / 1000;
+      const diff = now - item.addedAt;
+      let timeStr;
+      if (diff < 3600) timeStr = `${Math.round(diff / 60)}m ago`;
+      else if (diff < 86400) timeStr = `${Math.round(diff / 3600)}h ago`;
+      else timeStr = `${Math.round(diff / 86400)}d ago`;
+      timeEl.textContent = timeStr;
+    }
+  }
+
+  _render() {
+    const title = this._config.title;
+
+    // Inline SVG Kodi "K" logo — geometric mark matching Kodi's brand
+    const kodiLogoSvg = `<svg class="kodi-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-label="Kodi" fill="none">
+      <!-- Kodi-style "K" lettermark -->
+      <rect x="2" y="2" width="20" height="20" rx="4" fill="#17b2e8" opacity="0.9"/>
+      <path d="M7 5.5v13M7 12l5-6.5M7 12l5.5 7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="17" cy="12" r="3.2" stroke="#fff" stroke-width="1.8" fill="none" opacity="0.85"/>
+    </svg>`;
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          height: 100%;
+          --card-bg: #1a1a1a;
+          --card-border: rgba(255,255,255,0.06);
+          --text-primary: #f0f0f0;
+          --text-secondary: #999;
+          --text-dim: #666;
+          --accent-gold: #c9a73b;
+          --accent-movie: #c9a73b;
+          --accent-tv: #17b2e8;
+        }
+
+        ha-card {
+          height: 100%;
+          box-sizing: border-box;
+          position: relative;
+          background: var(--card-bg) !important;
+          border-radius: 12px;
+          overflow: hidden;
+          border: 1px solid var(--card-border) !important;
+        }
+
+        .card {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: var(--card-bg);
+          overflow: hidden;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        /* Background art with blur */
+        .bg-art, .bg-art-next {
+          position: absolute;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background-size: cover;
+          background-position: center;
+          filter: blur(20px) brightness(0.3);
+          transform: scale(1.1);
+          transition: opacity 0.8s ease;
+        }
+        .bg-art-next {
+          opacity: 0;
+        }
+        .bg-art-next.active {
+          opacity: 1;
+        }
+
+        /* Dark overlay */
+        .bg-overlay {
+          position: absolute;
+          top: 0; left: 0; right: 0; bottom: 0;
+          background: linear-gradient(
+            135deg,
+            rgba(0,0,0,0.7) 0%,
+            rgba(0,0,0,0.4) 50%,
+            rgba(0,0,0,0.7) 100%
+          );
+        }
+
+        /* Content */
+        .content {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 1;
+          padding: 20px;
+          display: flex;
+          flex-direction: column;
+        }
+
+        /* Header */
+        .header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 14px;
+        }
+
+        .header-title {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 15px;
+          font-weight: 600;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--text-secondary);
+        }
+
+        .kodi-logo {
+          width: 22px;
+          height: 22px;
+          flex-shrink: 0;
+          display: inline-block;
+          vertical-align: middle;
+          border-radius: 4px;
+        }
+
+        .counter {
+          font-size: 13px;
+          color: var(--text-dim);
+          font-variant-numeric: tabular-nums;
+        }
+
+        /* Main area */
+        .main {
+          display: flex;
+          gap: 20px;
+          flex: 1;
+          min-height: 0;
+        }
+
+        /* Poster */
+        .poster-wrap {
+          flex-shrink: 0;
+          width: auto;
+          aspect-ratio: 2/3;
+          height: 100%;
+          border-radius: 6px;
+          overflow: hidden;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+          background: #111;
+          position: relative;
+        }
+
+        .poster {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          transition: opacity 0.5s ease;
+        }
+
+        .poster-shimmer {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(255,255,255,0.03) 50%,
+            transparent 100%
+          );
+          animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+
+        /* Info */
+        .info {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          min-width: 0;
+          gap: 8px;
+        }
+
+        .item-type {
+          display: inline-block;
+          font-size: 13px;
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          padding: 5px 12px;
+          border-radius: 3px;
+          width: fit-content;
+        }
+
+        .item-type.movie {
+          background: rgba(201, 167, 59, 0.15);
+          color: var(--accent-movie);
+        }
+
+        .item-type.tv {
+          background: rgba(23, 178, 232, 0.15);
+          color: var(--accent-tv);
+        }
+
+        .item-title {
+          font-size: 28px;
+          font-weight: 700;
+          color: var(--text-primary);
+          line-height: 1.2;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+
+        .item-subtitle {
+          font-size: 17px;
+          color: var(--text-secondary);
+          line-height: 1.3;
+        }
+
+        .meta-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .item-rating {
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--accent-gold);
+        }
+
+        .time-ago {
+          font-size: 15px;
+          color: var(--text-dim);
+        }
+
+        .item-summary {
+          font-size: 16px;
+          color: var(--text-dim);
+          line-height: 1.5;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 6;
+          -webkit-box-orient: vertical;
+          margin-top: 2px;
+        }
+
+        /* Dots — color-coded */
+        .dots {
+          display: flex;
+          justify-content: center;
+          gap: 6px;
+          padding-top: 16px;
+          flex-shrink: 0;
+        }
+
+        .dot {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: rgba(255,255,255,0.15);
+          transition: all 0.3s ease;
+        }
+
+        .dot.movie {
+          background: rgba(201, 167, 59, 0.25);
+        }
+
+        .dot.tv {
+          background: rgba(23, 178, 232, 0.25);
+        }
+
+        .dot.active.movie {
+          background: var(--accent-movie);
+          box-shadow: 0 0 6px rgba(201, 167, 59, 0.4);
+          width: 18px;
+          border-radius: 3px;
+        }
+
+        .dot.active.tv {
+          background: var(--accent-tv);
+          box-shadow: 0 0 6px rgba(23, 178, 232, 0.4);
+          width: 18px;
+          border-radius: 3px;
+        }
+
+        /* Error */
+        .error-msg {
+          display: none;
+          text-align: center;
+          padding: 20px;
+          color: #cc4444;
+          font-size: 12px;
+        }
+
+        /* Loading */
+        .loading {
+          text-align: center;
+          padding: 40px 20px;
+          color: var(--text-dim);
+          font-size: 12px;
+        }
+      </style>
+
+      <ha-card>
+        <div class="card">
+          <div class="bg-art"></div>
+          <div class="bg-art-next"></div>
+          <div class="bg-overlay"></div>
+
+          <div class="content">
+            ${title ? `
+            <div class="header">
+              <span class="header-title">
+                ${kodiLogoSvg}
+                ${title}
+              </span>
+              <span class="counter"></span>
+            </div>
+            ` : ''}
+
+            <div class="error-msg"></div>
+
+            <div class="main">
+              <div class="poster-wrap">
+                <img class="poster" src="" alt="">
+                <div class="poster-shimmer"></div>
+              </div>
+              <div class="info">
+                <span class="item-type"></span>
+                <div class="item-title">Loading...</div>
+                <div class="item-subtitle"></div>
+                <div class="meta-row">
+                  <span class="item-rating"></span>
+                  <span class="time-ago"></span>
+                </div>
+                <div class="item-summary"></div>
+              </div>
+            </div>
+
+            <div class="dots"></div>
+          </div>
+        </div>
+      </ha-card>
+    `;
+  }
+
+  getCardSize() {
+    return 4;
+  }
+
+  static getStubConfig() {
+    return {
+      kodi_url: 'http://192.168.1.100:8080',
+      kodi_username: 'kodi',
+      kodi_password: 'password',
+      movies_count: 5,
+      shows_count: 5,
+      cycle_interval: 8,
+      title: 'Recently Added',
+    };
+  }
+
+  disconnectedCallback() {
+    if (this._cycleTimer) {
+      clearInterval(this._cycleTimer);
+      this._cycleTimer = null;
+    }
+  }
+}
+
+customElements.define('kodi-recently-added-card', KodiRecentlyAddedCard);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: 'kodi-recently-added-card',
+  name: 'Kodi Recently Added',
+  description: 'Auto-cycling display of recently added Kodi media — movies and TV shows.',
+});
