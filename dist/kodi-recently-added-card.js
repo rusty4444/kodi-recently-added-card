@@ -13,6 +13,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
     this._currentIndex = 0;
     this._cycleTimer = null;
     this._config = {};
+    this._trailerCache = {}; // keyed by tmdbId (or imdbId), value: URL string or ''
   }
 
   setConfig(config) {
@@ -85,6 +86,66 @@ class KodiRecentlyAddedCard extends HTMLElement {
     return `${base}/image/${encodeURIComponent(artValue)}`;
   }
 
+  /**
+   * Fetch a YouTube trailer URL from TMDB for the given ID.
+   * Accepts either a TMDB numeric ID or an IMDB ID (starting with 'tt').
+   * Results are cached in this._trailerCache.
+   * Returns a YouTube URL string, or '' if none found / API not configured.
+   */
+  async _fetchTrailer(id) {
+    if (!this._config.tmdb_api_key) return '';
+    if (!id) return '';
+
+    // Check cache
+    if (id in this._trailerCache) return this._trailerCache[id];
+
+    const bearer = this._config.tmdb_api_key;
+    const headers = { Authorization: `Bearer ${bearer}` };
+
+    try {
+      let numericId = id;
+
+      // If it's an IMDB ID (starts with 'tt'), resolve to TMDB ID first
+      if (String(id).startsWith('tt')) {
+        const findUrl = `https://api.themoviedb.org/3/find/${id}?external_source=imdb_id`;
+        const findResp = await fetch(findUrl, { headers });
+        if (!findResp.ok) throw new Error(`TMDB find HTTP ${findResp.status}`);
+        const findData = await findResp.json();
+        const movieResults = (findData.movie_results || []);
+        if (!movieResults.length) {
+          this._trailerCache[id] = '';
+          return '';
+        }
+        numericId = movieResults[0].id;
+      }
+
+      // Fetch trailer videos
+      const videosUrl = `https://api.themoviedb.org/3/movie/${numericId}/videos?language=en-US`;
+      const videosResp = await fetch(videosUrl, { headers });
+      if (!videosResp.ok) throw new Error(`TMDB videos HTTP ${videosResp.status}`);
+      const videosData = await videosResp.json();
+      const videos = videosData.results || [];
+
+      // Pick best YouTube trailer:
+      // 1. Official YouTube Trailer, 2. Any YouTube Trailer, 3. Any YouTube video
+      const ytVideos = videos.filter(v => v.site === 'YouTube');
+      const officialTrailer = ytVideos.find(v => v.type === 'Trailer' && v.official);
+      const anyTrailer = ytVideos.find(v => v.type === 'Trailer');
+      const anyYt = ytVideos[0];
+      const best = officialTrailer || anyTrailer || anyYt || null;
+
+      const result = best ? `https://www.youtube.com/watch?v=${best.key}` : '';
+      // Cache under both the original id and the resolved numeric id
+      this._trailerCache[id] = result;
+      if (numericId !== id) this._trailerCache[numericId] = result;
+      return result;
+    } catch (err) {
+      console.warn('Kodi Recently Added Card: TMDB trailer fetch error', err);
+      this._trailerCache[id] = '';
+      return '';
+    }
+  }
+
   async _fetchData() {
     try {
       const moviesCount = this._config.movies_count;
@@ -92,7 +153,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
 
       // Fetch recently added movies
       const moviesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedMovies', {
-        properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa', 'trailer'],
+        properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa', 'imdbnumber'],
         limits: { start: 0, end: moviesCount },
       });
 
@@ -132,7 +193,8 @@ class KodiRecentlyAddedCard extends HTMLElement {
           thumb: movie.art && movie.art.poster ? movie.art.poster : '',
           art: movie.art && movie.art.fanart ? movie.art.fanart : '',
           addedAt: parseDate(movie.dateadded),
-          trailerUrl: movie.trailer || '',
+          tmdbId: movie.imdbnumber || '',
+          trailerUrl: null, // null = not yet fetched; '' = fetched, none found
         };
       });
 
@@ -265,15 +327,39 @@ class KodiRecentlyAddedCard extends HTMLElement {
     }
     if (summaryEl) summaryEl.textContent = item.summary;
 
-    // Trailer button — only visible for movies with a trailer URL
+    // Trailer button — visible for movies once a TMDB trailer URL is resolved
     const trailerBtn = root.querySelector('.trailer-btn');
     if (trailerBtn) {
-      if (item.type === 'movie' && item.trailerUrl) {
-        trailerBtn.classList.add('visible');
-        trailerBtn.onclick = (e) => {
-          e.stopPropagation();
-          this._playTrailer(item.trailerUrl);
-        };
+      if (item.type === 'movie' && item.tmdbId) {
+        if (item.trailerUrl) {
+          // Already fetched — show immediately
+          trailerBtn.classList.add('visible');
+          trailerBtn.onclick = (e) => {
+            e.stopPropagation();
+            this._playTrailer(item.trailerUrl);
+          };
+        } else if (item.trailerUrl === null) {
+          // Not yet fetched — hide button and kick off async fetch
+          trailerBtn.classList.remove('visible');
+          trailerBtn.onclick = null;
+          this._fetchTrailer(item.tmdbId).then((url) => {
+            item.trailerUrl = url || ''; // store result ('' means none found)
+            // Only update the button if this item is still the displayed one
+            if (this._items[this._currentIndex] === item) {
+              if (url) {
+                trailerBtn.classList.add('visible');
+                trailerBtn.onclick = (e) => {
+                  e.stopPropagation();
+                  this._playTrailer(url);
+                };
+              }
+            }
+          });
+        } else {
+          // trailerUrl === '' — fetched but nothing found
+          trailerBtn.classList.remove('visible');
+          trailerBtn.onclick = null;
+        }
       } else {
         trailerBtn.classList.remove('visible');
         trailerBtn.onclick = null;
@@ -319,29 +405,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
   _playTrailer(url) {
     const ytId = this._getYouTubeId(url);
     if (!ytId) return;
-
-    const root = this.shadowRoot;
-    const container = root.querySelector('.trailer-container');
-    const frame = root.querySelector('#trailerFrame');
-    const closeBtn = root.querySelector('.trailer-close');
-
-    frame.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0`;
-    container.classList.add('active');
-
-    // Pause cycling
-    if (this._cycleTimer) {
-      clearInterval(this._cycleTimer);
-      this._cycleTimer = null;
-    }
-
-    // Close handler
-    const close = () => {
-      frame.src = '';
-      container.classList.remove('active');
-      this._startCycle();  // Resume cycling
-      closeBtn.removeEventListener('click', close);
-    };
-    closeBtn.addEventListener('click', close);
+    window.open(`https://www.youtube.com/watch?v=${ytId}`, '_blank');
   }
 
   _render() {
@@ -790,6 +854,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
       shows_count: 5,
       cycle_interval: 8,
       title: 'Recently Added',
+      tmdb_api_key: 'YOUR_TMDB_READ_ACCESS_TOKEN',
     };
   }
 
