@@ -106,8 +106,9 @@ The card connects directly to Kodi's built-in JSON-RPC API over HTTP. To enable 
 
 ## Related
 
-- [plex-recently-added-card](https://github.com/rusty4444/plex-recently-added-card) — the Plex version of this project
-- [kodi-now-showing](https://github.com/rusty4444/kodi-now-showing) — a cinema-style "Now Showing" marquee display for Kodi playback
+- [kodi-now-showing](https://github.com/rusty4444/kodi-now-showing) — cinema-style Now Showing marquee for Kodi
+- [plex-recently-added-card](https://github.com/rusty4444/plex-recently-added-card) / [plex-now-showing](https://github.com/rusty4444/plex-now-showing) — Plex versions
+- [jellyfin-recently-added-card](https://github.com/rusty4444/jellyfin-recently-added-card) / [jellyfin-now-showing](https://github.com/rusty4444/jellyfin-now-showing) — Jellyfin versions
 
 ---
 
