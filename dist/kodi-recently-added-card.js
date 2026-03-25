@@ -92,7 +92,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
 
       // Fetch recently added movies
       const moviesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedMovies', {
-        properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa'],
+        properties: ['title', 'year', 'rating', 'runtime', 'genre', 'plot', 'art', 'dateadded', 'mpaa', 'trailer'],
         limits: { start: 0, end: moviesCount },
       });
 
@@ -132,6 +132,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
           thumb: movie.art && movie.art.poster ? movie.art.poster : '',
           art: movie.art && movie.art.fanart ? movie.art.fanart : '',
           addedAt: parseDate(movie.dateadded),
+          trailerUrl: movie.trailer || '',
         };
       });
 
@@ -172,6 +173,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
           thumb: (ep.art && (ep.art['tvshow.poster'] || ep.art.thumb)) || '',
           art: (ep.art && (ep.art['tvshow.fanart'] || ep.art.fanart)) || '',
           addedAt: parseDate(ep.dateadded),
+          trailerUrl: '',
         };
       });
 
@@ -263,6 +265,21 @@ class KodiRecentlyAddedCard extends HTMLElement {
     }
     if (summaryEl) summaryEl.textContent = item.summary;
 
+    // Trailer button — only visible for movies with a trailer URL
+    const trailerBtn = root.querySelector('.trailer-btn');
+    if (trailerBtn) {
+      if (item.type === 'movie' && item.trailerUrl) {
+        trailerBtn.classList.add('visible');
+        trailerBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._playTrailer(item.trailerUrl);
+        };
+      } else {
+        trailerBtn.classList.remove('visible');
+        trailerBtn.onclick = null;
+      }
+    }
+
     // Dots — color-coded: gold for movies, blue for TV
     if (dotsEl) {
       dotsEl.innerHTML = this._items
@@ -290,6 +307,41 @@ class KodiRecentlyAddedCard extends HTMLElement {
       else timeStr = `${Math.round(diff / 86400)}d ago`;
       timeEl.textContent = timeStr;
     }
+  }
+
+  _getYouTubeId(url) {
+    if (!url) return null;
+    const match = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([\w-]{11})/) ||
+                  url.match(/[?&]videoid=([\w-]{11})/);
+    return match ? match[1] : null;
+  }
+
+  _playTrailer(url) {
+    const ytId = this._getYouTubeId(url);
+    if (!ytId) return;
+
+    const root = this.shadowRoot;
+    const container = root.querySelector('.trailer-container');
+    const frame = root.querySelector('#trailerFrame');
+    const closeBtn = root.querySelector('.trailer-close');
+
+    frame.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0`;
+    container.classList.add('active');
+
+    // Pause cycling
+    if (this._cycleTimer) {
+      clearInterval(this._cycleTimer);
+      this._cycleTimer = null;
+    }
+
+    // Close handler
+    const close = () => {
+      frame.src = '';
+      container.classList.remove('active');
+      this._startCycle();  // Resume cycling
+      closeBtn.removeEventListener('click', close);
+    };
+    closeBtn.addEventListener('click', close);
   }
 
   _render() {
@@ -590,6 +642,87 @@ class KodiRecentlyAddedCard extends HTMLElement {
           color: var(--text-dim);
           font-size: 12px;
         }
+
+        /* Trailer button */
+        .trailer-btn {
+          display: none;
+          align-items: center;
+          gap: 6px;
+          background: rgba(255, 255, 255, 0.1);
+          border: 1px solid rgba(255, 255, 255, 0.2);
+          color: #ddd;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 12px;
+          font-weight: 600;
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+          padding: 6px 14px;
+          border-radius: 4px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+
+        .trailer-btn:hover {
+          background: rgba(255, 255, 255, 0.2);
+          color: #fff;
+        }
+
+        .trailer-btn.visible {
+          display: inline-flex;
+        }
+
+        .trailer-btn svg {
+          width: 14px;
+          height: 14px;
+          fill: currentColor;
+        }
+
+        /* Trailer embed container */
+        .trailer-container {
+          display: none;
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 10;
+          background: #000;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .trailer-container.active {
+          display: flex;
+        }
+
+        .trailer-container iframe {
+          width: 100%;
+          height: 100%;
+          border: none;
+        }
+
+        .trailer-close {
+          position: absolute;
+          top: 8px;
+          right: 8px;
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.7);
+          border: 1px solid rgba(255, 255, 255, 0.3);
+          color: #fff;
+          font-size: 18px;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 11;
+          transition: background 0.2s;
+        }
+
+        .trailer-close:hover {
+          background: rgba(255, 255, 255, 0.2);
+        }
       </style>
 
       <ha-card>
@@ -597,6 +730,11 @@ class KodiRecentlyAddedCard extends HTMLElement {
           <div class="bg-art"></div>
           <div class="bg-art-next"></div>
           <div class="bg-overlay"></div>
+
+          <div class="trailer-container" id="trailerContainer">
+            <button class="trailer-close" id="trailerClose">✕</button>
+            <iframe id="trailerFrame" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+          </div>
 
           <div class="content">
             ${title ? `
@@ -625,6 +763,10 @@ class KodiRecentlyAddedCard extends HTMLElement {
                   <span class="time-ago"></span>
                 </div>
                 <div class="item-summary"></div>
+                <button class="trailer-btn" id="trailerBtn">
+                  <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                  Trailer
+                </button>
               </div>
             </div>
 
