@@ -18,7 +18,7 @@ A custom Home Assistant Lovelace card that shows your recently added movies and 
 - Color-coded dots — gold for movies, blue for TV shows
 - Connects directly to your Kodi web interface (no additional integrations required beyond the Kodi add-on)
 - Deduplicates TV shows — only shows the most recent entry per series
-- **Trailers** — tap the trailer button on any movie to open its YouTube trailer (requires a free TMDB API key)
+- **Trailers** — tap the trailer button on movies and TV shows to watch YouTube trailers (requires a free TMDB API key)
 
 ---
 
@@ -101,7 +101,14 @@ The card connects directly to Kodi's built-in JSON-RPC API over HTTP. To enable 
 
 ## Trailers
 
-Tap the **Trailer** button on any movie to open its YouTube trailer in a new tab. This feature requires a free TMDB (The Movie Database) API key.
+Tap the **Trailer** button on any movie or TV show to watch its YouTube trailer. This feature requires a free TMDB (The Movie Database) API key.
+
+For **movies**, the card looks up the movie trailer directly from TMDB.
+
+For **TV shows**, the card tries to find the best available trailer in this order:
+1. Season-specific trailer (e.g., the Season 2 trailer)
+2. Series trailer (the main show trailer)
+3. If no trailer is found on TMDB, the button is hidden for that item
 
 The card uses Kodi's `imdbnumber` field (which contains the TMDB or IMDB ID stored in the movie's metadata) to look up trailers via the TMDB API.
 
