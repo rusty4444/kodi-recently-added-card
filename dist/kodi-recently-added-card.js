@@ -159,7 +159,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
 
       // Fetch recently added episodes (fetch more for deduplication)
       const episodesResult = await this._kodiRPC('VideoLibrary.GetRecentlyAddedEpisodes', {
-        properties: ['title', 'showtitle', 'season', 'episode', 'rating', 'runtime', 'plot', 'art', 'dateadded'],
+        properties: ['title', 'showtitle', 'season', 'episode', 'rating', 'runtime', 'plot', 'art', 'dateadded', 'tvshowid'],
         limits: { start: 0, end: showsCount * 4 },
       });
 
@@ -235,7 +235,9 @@ class KodiRecentlyAddedCard extends HTMLElement {
           thumb: (ep.art && (ep.art['tvshow.poster'] || ep.art.thumb)) || '',
           art: (ep.art && (ep.art['tvshow.fanart'] || ep.art.fanart)) || '',
           addedAt: parseDate(ep.dateadded),
-          trailerUrl: '',
+          tvshowId: ep.tvshowid || null,
+          seasonNumber: ep.season || null,
+          trailerUrl: null,
         };
       });
 
@@ -327,42 +329,35 @@ class KodiRecentlyAddedCard extends HTMLElement {
     }
     if (summaryEl) summaryEl.textContent = item.summary;
 
-    // Trailer button — visible for movies once a TMDB trailer URL is resolved
+    // Trailer button — show for movies and TV shows; lazy-fetch trailer URL
     const trailerBtn = root.querySelector('.trailer-btn');
     if (trailerBtn) {
-      if (item.type === 'movie' && item.tmdbId) {
-        if (item.trailerUrl) {
-          // Already fetched — show immediately
+      trailerBtn.classList.remove('visible');
+      trailerBtn.onclick = null;
+
+      const showTrailerBtn = (url) => {
+        if (url && this._items[this._currentIndex] === item) {
           trailerBtn.classList.add('visible');
-          trailerBtn.onclick = (e) => {
-            e.stopPropagation();
-            this._playTrailer(item.trailerUrl);
-          };
-        } else if (item.trailerUrl === null) {
-          // Not yet fetched — hide button and kick off async fetch
-          trailerBtn.classList.remove('visible');
-          trailerBtn.onclick = null;
-          this._fetchTrailer(item.tmdbId).then((url) => {
-            item.trailerUrl = url || ''; // store result ('' means none found)
-            // Only update the button if this item is still the displayed one
-            if (this._items[this._currentIndex] === item) {
-              if (url) {
-                trailerBtn.classList.add('visible');
-                trailerBtn.onclick = (e) => {
-                  e.stopPropagation();
-                  this._playTrailer(url);
-                };
-              }
-            }
-          });
-        } else {
-          // trailerUrl === '' — fetched but nothing found
-          trailerBtn.classList.remove('visible');
-          trailerBtn.onclick = null;
+          trailerBtn.onclick = (e) => { e.stopPropagation(); this._playTrailer(url); };
         }
-      } else {
-        trailerBtn.classList.remove('visible');
-        trailerBtn.onclick = null;
+      };
+
+      if (item.trailerUrl) {
+        showTrailerBtn(item.trailerUrl);
+      } else if (item.trailerUrl === null) {
+        // Not yet fetched — determine fetch method
+        let fetchPromise;
+        if (item.type === 'movie' && item.tmdbId) {
+          fetchPromise = this._fetchTrailer(item.tmdbId);
+        } else if (item.type === 'tv' && item.tvshowId) {
+          fetchPromise = this._fetchTvTrailer(item.tvshowId, item.seasonNumber);
+        }
+        if (fetchPromise) {
+          fetchPromise.then((url) => {
+            item.trailerUrl = url || undefined;
+            showTrailerBtn(url);
+          });
+        }
       }
     }
 
@@ -392,6 +387,86 @@ class KodiRecentlyAddedCard extends HTMLElement {
       else if (diff < 86400) timeStr = `${Math.round(diff / 3600)}h ago`;
       else timeStr = `${Math.round(diff / 86400)}d ago`;
       timeEl.textContent = timeStr;
+    }
+  }
+
+  async _fetchTvTrailer(tvshowId, seasonNumber) {
+    const cacheKey = `tv_${tvshowId}_${seasonNumber}`;
+    if (cacheKey in this._trailerCache) return this._trailerCache[cacheKey];
+    if (!this._config.tmdb_api_key) return null;
+
+    const bearer = this._config.tmdb_api_key;
+    const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/json' };
+
+    try {
+      // Step 1: Get the TV show details from Kodi to find its imdbnumber (TMDB ID)
+      const showResult = await this._kodiRPC('VideoLibrary.GetTVShowDetails', {
+        tvshowid: tvshowId,
+        properties: ['imdbnumber'],
+      });
+      const imdbnumber = showResult?.tvshowdetails?.imdbnumber || '';
+      if (!imdbnumber) {
+        this._trailerCache[cacheKey] = null;
+        return null;
+      }
+
+      // Resolve to a numeric TMDB ID (imdbnumber may be TMDB numeric or IMDB 'tt...')
+      let tmdbId = imdbnumber;
+      if (String(imdbnumber).startsWith('tt')) {
+        // It's an IMDB ID — find the TMDB TV show ID
+        const findResp = await fetch(
+          `https://api.themoviedb.org/3/find/${imdbnumber}?external_source=imdb_id`,
+          { headers }
+        );
+        if (findResp.ok) {
+          const findData = await findResp.json();
+          const tvResult = (findData.tv_results || [])[0];
+          if (tvResult) tmdbId = String(tvResult.id);
+          else { this._trailerCache[cacheKey] = null; return null; }
+        } else { this._trailerCache[cacheKey] = null; return null; }
+      }
+
+      // Step 2: Try season-specific trailer first
+      let youtubeUrl = null;
+      if (seasonNumber) {
+        try {
+          const seasonResp = await fetch(
+            `https://api.themoviedb.org/3/tv/${tmdbId}/season/${seasonNumber}/videos?language=en-US`,
+            { headers }
+          );
+          if (seasonResp.ok) {
+            const seasonData = await seasonResp.json();
+            const vids = seasonData.results || [];
+            const trailer = vids.find(v => v.type === 'Trailer' && v.site === 'YouTube' && v.official) ||
+                            vids.find(v => v.type === 'Trailer' && v.site === 'YouTube') ||
+                            vids.find(v => v.site === 'YouTube');
+            if (trailer) youtubeUrl = `https://www.youtube.com/watch?v=${trailer.key}`;
+          }
+        } catch (e) { /* fall through to series-level */ }
+      }
+
+      // Step 3: Fall back to series-level trailer
+      if (!youtubeUrl) {
+        const seriesResp = await fetch(
+          `https://api.themoviedb.org/3/tv/${tmdbId}/videos?language=en-US`,
+          { headers }
+        );
+        if (seriesResp.ok) {
+          const seriesData = await seriesResp.json();
+          const vids = seriesData.results || [];
+          const trailer = vids.find(v => v.type === 'Trailer' && v.site === 'YouTube' && v.official) ||
+                          vids.find(v => v.type === 'Trailer' && v.site === 'YouTube') ||
+                          vids.find(v => v.site === 'YouTube');
+          if (trailer) youtubeUrl = `https://www.youtube.com/watch?v=${trailer.key}`;
+        }
+      }
+
+      this._trailerCache[cacheKey] = youtubeUrl;
+      return youtubeUrl;
+    } catch (err) {
+      console.warn('Kodi Recently Added Card: TV trailer fetch error', err);
+      this._trailerCache[cacheKey] = null;
+      return null;
     }
   }
 
@@ -569,11 +644,12 @@ class KodiRecentlyAddedCard extends HTMLElement {
         .header {
           display: flex;
           align-items: center;
-          justify-content: space-between;
+          gap: 10px;
           margin-bottom: 14px;
         }
 
         .header-title {
+          flex: 1;
           display: flex;
           align-items: center;
           gap: 8px;
@@ -782,19 +858,22 @@ class KodiRecentlyAddedCard extends HTMLElement {
         .trailer-btn {
           display: none;
           align-items: center;
+          justify-content: center;
           gap: 6px;
           background: rgba(255, 255, 255, 0.1);
           border: 1px solid rgba(255, 255, 255, 0.2);
           color: #ddd;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          font-size: 12px;
+          font-size: 13px;
           font-weight: 600;
-          letter-spacing: 0.05em;
+          letter-spacing: 0.08em;
           text-transform: uppercase;
-          padding: 6px 14px;
-          border-radius: 4px;
+          padding: 8px 16px;
+          border-radius: 6px;
           cursor: pointer;
           transition: all 0.2s ease;
+          min-width: 100px;
+          min-height: 38px;
         }
 
         .trailer-btn:hover {
@@ -807,8 +886,8 @@ class KodiRecentlyAddedCard extends HTMLElement {
         }
 
         .trailer-btn svg {
-          width: 14px;
-          height: 14px;
+          width: 16px;
+          height: 16px;
           fill: currentColor;
         }
 
@@ -878,6 +957,10 @@ class KodiRecentlyAddedCard extends HTMLElement {
                 ${kodiLogoSvg}
                 ${title}
               </span>
+              <button class="trailer-btn" id="trailerBtn">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                Trailer
+              </button>
               <span class="counter"></span>
             </div>
             ` : ''}
@@ -898,10 +981,6 @@ class KodiRecentlyAddedCard extends HTMLElement {
                   <span class="time-ago"></span>
                 </div>
                 <div class="item-summary"></div>
-                <button class="trailer-btn" id="trailerBtn">
-                  <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                  Trailer
-                </button>
               </div>
             </div>
 
