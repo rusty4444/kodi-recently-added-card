@@ -136,3 +136,5 @@ The card uses TMDB to look up movie trailers by matching the media's TMDB ID. Tr
 ## Credits
 
 Built by Sam Russell — AI used in development.
+
+YouTube trailer embedding approach adapted from [ha-youtubevideocard](https://github.com/loryanstrant/ha-youtubevideocard) by [loryanstrant](https://github.com/loryanstrant).
