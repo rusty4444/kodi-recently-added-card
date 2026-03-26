@@ -130,6 +130,7 @@ The card uses TMDB to look up movie trailers by matching the media's TMDB ID. Tr
 - [kodi-now-showing](https://github.com/rusty4444/kodi-now-showing) — cinema-style Now Showing marquee for Kodi
 - [plex-recently-added-card](https://github.com/rusty4444/plex-recently-added-card) / [plex-now-showing](https://github.com/rusty4444/plex-now-showing) — Plex versions
 - [jellyfin-recently-added-card](https://github.com/rusty4444/jellyfin-recently-added-card) / [jellyfin-now-showing](https://github.com/rusty4444/jellyfin-now-showing) — Jellyfin versions
+- [emby-recently-added-card](https://github.com/rusty4444/emby-recently-added-card) / [emby-now-showing](https://github.com/rusty4444/emby-now-showing) — Emby versions
 
 ---
 
