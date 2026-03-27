@@ -30,6 +30,13 @@ class KodiRecentlyAddedCard extends HTMLElement {
       ...config,
     };
 
+    // Apply fixed-height class if fill_height is disabled
+    if (this._config.fill_height === false) {
+      this.classList.add('fixed-height');
+    } else {
+      this.classList.remove('fixed-height');
+    }
+
     this._render();
     this._fetchData();
   }
@@ -587,6 +594,24 @@ class KodiRecentlyAddedCard extends HTMLElement {
           border: 1px solid var(--card-border) !important;
         }
 
+        :host(.fixed-height) {
+          height: auto;
+        }
+
+        :host(.fixed-height) ha-card {
+          height: auto;
+          min-height: 300px;
+        }
+
+        :host(.fixed-height) .card {
+          position: relative;
+          min-height: 300px;
+        }
+
+        :host(.fixed-height) .content {
+          min-height: 300px;
+        }
+
         .card {
           position: absolute;
           top: 0;
@@ -1056,6 +1081,10 @@ class KodiRecentlyAddedCard extends HTMLElement {
           name: 'tmdb_api_key',
           selector: { text: { type: 'password' } },
         },
+        {
+          name: 'fill_height',
+          selector: { boolean: {} },
+        },
       ],
       computeLabel: (schema) => {
         const labels = {
@@ -1067,6 +1096,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
           cycle_interval: 'Cycle Interval',
           title: 'Card Title',
           tmdb_api_key: 'TMDB API Key (for trailers)',
+          fill_height: 'Fill Container Height',
         };
         return labels[schema.name] || schema.name;
       },
@@ -1076,6 +1106,7 @@ class KodiRecentlyAddedCard extends HTMLElement {
           kodi_username: 'Optional — only if HTTP auth is enabled',
           kodi_password: 'Optional — only if HTTP auth is enabled',
           tmdb_api_key: 'Optional — enables trailer button. Get a free key at themoviedb.org',
+          fill_height: 'Enable if your card has proper height. Disable if the card appears collapsed/too short.',
         };
         return helpers[schema.name] || undefined;
       },
